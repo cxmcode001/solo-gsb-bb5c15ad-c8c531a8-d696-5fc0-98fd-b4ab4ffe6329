@@ -11,6 +11,7 @@ from . import db
 from .audit import audit_cadence
 from .consistency import check_consistency
 from .pairing import PairableFault, pair_faults
+from .recovery import diagnose_mutation_recovery
 from .engine import (
     Condition,
     Event,
@@ -1047,6 +1048,100 @@ def query_fault_pairing(
     }
     payload["start"] = start
     payload["end"] = end
+    return payload
+
+
+def query_mutation_recovery(
+    device: str,
+    metric: str,
+    start: float,
+    end: float,
+    rate_threshold: float,
+    regression_tolerance: float,
+    observation_seconds: float,
+) -> dict:
+    """Read-only single-channel abrupt-change recovery diagnostic.
+
+    Reads the channel's stored events over the half-open window
+    ``[start, end)`` plus the last sample before its start (that sample may
+    serve as the pre-mutation baseline while still valid under the channel's
+    configured TTL), then walks adjacent valid samples as described in
+    :func:`app.recovery.diagnose_mutation_recovery`: change rates use the
+    actual inter-sample elapsed time, TTL-expiry gaps cut continuity (no
+    jump is judged across them), and every super-threshold jump records its
+    baseline and looks forward for the first sample back inside the baseline
+    tolerance within the observation duration.  The query only ``SELECT``\ s
+    the ``events`` / ``channel_ttls`` tables: it never recomputes rules or
+    writes fault results.
+
+    Raises ``KeyError`` when the channel has no events and ``ValueError``
+    for an invalid window or parameter.
+    """
+    device = device.strip()
+    metric = metric.strip()
+    if not device or not metric:
+        raise ValueError("device and metric are required")
+    start = float(start)
+    end = float(end)
+    if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+        raise ValueError("diagnostic end must be greater than start (half-open [start, end))")
+    rate_threshold = float(rate_threshold)
+    if not math.isfinite(rate_threshold) or rate_threshold <= 0:
+        raise ValueError("rate_threshold must be a positive finite number of units per second")
+    regression_tolerance = float(regression_tolerance)
+    if not math.isfinite(regression_tolerance) or regression_tolerance < 0:
+        raise ValueError("regression_tolerance must be a finite non-negative number")
+    observation_seconds = float(observation_seconds)
+    if not math.isfinite(observation_seconds) or observation_seconds <= 0:
+        raise ValueError("observation_seconds must be a positive finite number of seconds")
+
+    channel = db.query_one(
+        "SELECT COUNT(*) AS c, MIN(ts) AS min_ts, MAX(ts) AS max_ts FROM events"
+        " WHERE device = ? AND metric = ?",
+        (device, metric),
+    )
+    if channel is None or channel["c"] == 0:
+        raise KeyError(f"channel not found: {device}/{metric}")
+
+    before = db.query_one(
+        "SELECT id, ts, value FROM events"
+        " WHERE device = ? AND metric = ? AND value IS NOT NULL AND ts < ?"
+        " ORDER BY ts DESC, id DESC LIMIT 1",
+        (device, metric, start),
+    )
+    rows = db.query(
+        "SELECT id, ts, value FROM events"
+        " WHERE device = ? AND metric = ? AND value IS NOT NULL AND ts >= ? AND ts < ?"
+        " ORDER BY ts, id",
+        (device, metric, start, end),
+    )
+    samples: list[tuple[int, float, float]] = [(r["id"], r["ts"], r["value"]) for r in rows]
+    if before is not None:
+        samples.insert(0, (before["id"], before["ts"], before["value"]))
+
+    ttl_row = db.fetch_channel_ttl(device, metric)
+    ttl = ttl_row["ttl_seconds"] if ttl_row else None
+
+    result = diagnose_mutation_recovery(
+        samples,
+        start,
+        end,
+        rate_threshold,
+        regression_tolerance,
+        observation_seconds,
+        ttl=ttl,
+    )
+    payload = result.to_dict()
+    payload["device"] = device
+    payload["metric"] = metric
+    payload["channel"] = {
+        "device": device,
+        "metric": metric,
+        "ttl_seconds": ttl,
+        "event_count": channel["c"],
+        "min_ts": channel["min_ts"],
+        "max_ts": channel["max_ts"],
+    }
     return payload
 
 

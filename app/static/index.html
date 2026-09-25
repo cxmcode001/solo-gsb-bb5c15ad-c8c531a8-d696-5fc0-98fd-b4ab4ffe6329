@@ -436,6 +436,54 @@
       </section>
 
       <section class="card">
+        <div class="card-head">
+          <h2>单通道突变恢复诊断</h2>
+          <span class="muted small">只读 · 读取事件与通道有效期，不重算故障</span>
+        </div>
+        <div class="muted small ledger-hint">
+          从已有通道选择<b>设备与指标</b>，输入 <b>UTC 半开时间范围</b> <code>[start, end)</code>、<b>正数跳变速率阈值</b>（单位 / 秒）、
+          <b>非负回归容差</b>与<b>正数观察时长</b>（秒）。服务端按相邻有效样本的<b>实际时间差</b>计算变化速率；
+          <b>采样有效期到期的空档切断连续性，不跨空档判突变</b>，范围起点前仍有效的最近样本可作<b>基线</b>。
+          速率严格超过阈值时记下突变前基线，并在观察时长内寻找<b>首个回到基线容差内</b>的样本：找到为<b>已恢复</b>（给出恢复耗时），
+          否则为<b>未恢复</b>（观察超时 / 有效期空档切断 / 范围结束）。已归属片段的样本不会重复开段。
+        </div>
+        <div class="ledger-form">
+          <label class="ledger-field">设备
+            <select id="rec-device"></select>
+          </label>
+          <label class="ledger-field">指标
+            <select id="rec-metric"></select>
+          </label>
+          <label class="ledger-field">起始（本机时区） <input type="datetime-local" id="rec-start" step="1" /></label>
+          <label class="ledger-field">结束（本机时区） <input type="datetime-local" id="rec-end" step="1" /></label>
+          <label class="ledger-field">跳变速率阈值（&gt; 0，单位/秒） <input id="rec-rate" type="number" min="0" step="any" value="0.1" /></label>
+          <label class="ledger-field">回归容差（≥ 0） <input id="rec-tolerance" type="number" min="0" step="any" value="1" /></label>
+          <label class="ledger-field">观察时长（秒，&gt; 0） <input id="rec-observation" type="number" min="0" step="any" value="300" /></label>
+          <button id="btn-rec-query" class="btn btn-small btn-primary">诊断</button>
+          <button id="btn-rec-fill" class="btn btn-small">填入当前筛选范围</button>
+        </div>
+        <div class="muted small">时间在本机时区输入、按 UTC 查询；速率 = |Δ值| / 相邻样本实际秒数，严格大于阈值才判突变；回到基线容差按 |值 − 基线| ≤ 容差判定。</div>
+        <div id="rec-summary" class="ledger-summary" hidden></div>
+        <div id="rec-segments-wrap" class="ledger-table-wrap" hidden>
+          <table class="data-table ledger-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>状态</th>
+                <th>突变前基线样本</th>
+                <th>突变起始样本</th>
+                <th>结束样本</th>
+                <th>跳变速率</th>
+                <th>最大偏差</th>
+                <th>恢复耗时 / 未恢复原因</th>
+              </tr>
+            </thead>
+            <tbody id="rec-segment-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
         <div class="card-head"><h2>区间标注</h2><span id="anno-count" class="muted"></span></div>
         <div id="anno-list"></div>
       </section>

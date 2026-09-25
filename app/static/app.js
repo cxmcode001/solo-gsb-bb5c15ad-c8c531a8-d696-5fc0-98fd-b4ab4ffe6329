@@ -41,6 +41,9 @@ const state = {
   pairCauseId: null,
   pairEffectId: null,
   pairResult: null,
+  recDevice: "",
+  recMetric: "",
+  recResult: null,
   imports: [],
 };
 
@@ -1680,6 +1683,128 @@ function renderPairing() {
   unmatchedWrap.hidden = false;
 }
 
+/* --------------------- single-channel mutation recovery --------------------- */
+
+function renderRecoveryChannels() {
+  const devSel = $("rec-device");
+  const metSel = $("rec-metric");
+  const devices = [...new Set(state.channels.map((c) => c.device))].sort();
+  if (state.recDevice && !devices.includes(state.recDevice)) state.recDevice = "";
+  if (!state.recDevice && devices.length) state.recDevice = devices[0];
+  devSel.innerHTML = devices.map((d) =>
+    `<option value="${esc(d)}"${d === state.recDevice ? " selected" : ""}>${esc(d)}</option>`).join("");
+
+  const metrics = state.channels
+    .filter((c) => c.device === state.recDevice)
+    .map((c) => c.metric)
+    .sort();
+  if (state.recMetric && !metrics.includes(state.recMetric)) state.recMetric = "";
+  if (!state.recMetric && metrics.length) state.recMetric = metrics[0];
+  metSel.innerHTML = metrics.map((m) =>
+    `<option value="${esc(m)}"${m === state.recMetric ? " selected" : ""}>${esc(m)}</option>`).join("");
+}
+
+function fillRecoveryRange() {
+  ensureView();
+  if (typeof state.viewStart === "number" && isFinite(state.viewStart)) {
+    $("rec-start").value = toLocalInput(state.viewStart);
+  }
+  if (typeof state.viewEnd === "number" && isFinite(state.viewEnd)) {
+    $("rec-end").value = toLocalInput(state.viewEnd);
+  }
+}
+
+async function runMutationRecovery() {
+  const device = $("rec-device").value;
+  const metric = $("rec-metric").value;
+  const s = fromLocalInput($("rec-start").value);
+  const e = fromLocalInput($("rec-end").value);
+  const rate = Number($("rec-rate").value);
+  const tolerance = Number($("rec-tolerance").value);
+  const observation = Number($("rec-observation").value);
+  if (!device || !metric) { toast("请先选择设备与指标（需已导入该通道事件）", true); return; }
+  if (s === null || e === null || e <= s) { toast("请填写有效的起始/结束 UTC 时间（半开区间，结束须晚于起始）", true); return; }
+  if (!Number.isFinite(rate) || rate <= 0) { toast("跳变速率阈值必须为正有限数（单位 / 秒）", true); return; }
+  if (!Number.isFinite(tolerance) || tolerance < 0) { toast("回归容差必须为非负有限数", true); return; }
+  if (!Number.isFinite(observation) || observation <= 0) { toast("观察时长必须为正秒数", true); return; }
+  const params = new URLSearchParams({
+    device, metric, start: s, end: e,
+    rate_threshold: rate,
+    regression_tolerance: tolerance,
+    observation_seconds: observation,
+  });
+  const btn = $("btn-rec-query");
+  btn.disabled = true;
+  try {
+    state.recResult = await api(`/api/mutation-recovery?${params}`);
+    renderMutationRecovery();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+const RECOVERY_REASON_META = {
+  observation_expired: { label: "未恢复：观察时长内未回到基线容差", cls: "rec-unrec" },
+  validity_gap: { label: "未恢复：采样有效期空档切断，无法继续观察", cls: "rec-gap" },
+  range_end: { label: "未恢复：查询范围结束时仍偏离基线", cls: "rec-unrec" },
+};
+
+function recSampleHtml(sample) {
+  return `${fmtTime(sample.ts)}<br/><span class="muted small">event ${sample.event_id} · 值 ${fmtNum(sample.value)}</span>`;
+}
+
+function renderMutationRecovery() {
+  const r = state.recResult;
+  const summary = $("rec-summary");
+  const wrap = $("rec-segments-wrap");
+  if (!r) {
+    summary.hidden = true;
+    wrap.hidden = true;
+    return;
+  }
+  const ttlText = r.channel.ttl_seconds === null
+    ? "保持到下一样本（无空档）"
+    : `有效期 ${fmtDur(r.channel.ttl_seconds)}（${Number(r.channel.ttl_seconds)} 秒），到期空档切断连续性`;
+  summary.hidden = false;
+  summary.innerHTML = `
+    <div class="ledger-line"><b>通道：</b><span class="tag">${esc(r.device)}/${esc(r.metric)}</span>
+      <span class="muted small">（${ttlText} · 该通道共 ${r.channel.event_count} 个事件）</span></div>
+    <div class="ledger-line"><b>诊断范围：</b>${fmtTime(r.start)} → ${fmtTime(r.end)}
+      （半开 · ${fmtDur(r.end - r.start)}）· 跳变速率阈值 ${fmtNum(r.rate_threshold)}（单位/秒，严格大于判突变）
+      · 回归容差 ${fmtNum(r.regression_tolerance)} · 观察时长 ${fmtDur(r.observation_seconds)}</div>
+    <div class="ledger-line"><b>突变片段：</b>${r.segment_count} 段
+      · <span style="color:#065f46">已恢复 ${r.recovered_count}</span>
+      · <span style="color:#991b1b">未恢复 ${r.unrecovered_count}</span></div>`;
+
+  const rows = $("rec-segment-rows");
+  if (r.segments.length) {
+    rows.innerHTML = r.segments.map((seg, i) => {
+      const status = seg.recovered
+        ? `<span class="rec-status recovered">已恢复</span>`
+        : `<span class="rec-status unrecovered">未恢复</span>`;
+      const outcome = seg.recovered
+        ? `<b>${Math.round(seg.recovery_seconds)}</b> 秒（${fmtDur(seg.recovery_seconds)}）`
+        : esc((RECOVERY_REASON_META[seg.unrecovered_reason] || { label: seg.unrecovered_reason }).label);
+      return `
+      <tr class="${seg.recovered ? "rec-row-ok" : "rec-row-bad"}">
+        <td>${i + 1}</td>
+        <td>${status}</td>
+        <td>${recSampleHtml(seg.baseline_sample)}</td>
+        <td>${recSampleHtml(seg.start_sample)}<br/><span class="muted small">速率 ${fmtNum(seg.jump_rate)}/秒</span></td>
+        <td>${recSampleHtml(seg.end_sample)}</td>
+        <td><b>${fmtNum(seg.jump_rate)}</b>/秒</td>
+        <td><b>${fmtNum(seg.max_deviation)}</b><br/><span class="muted small">@ ${fmtTime(seg.max_deviation_sample.ts)}<br/>值 ${fmtNum(seg.max_deviation_sample.value)}</span></td>
+        <td>${outcome}</td>
+      </tr>`;
+    }).join("");
+  } else {
+    rows.innerHTML = `<tr><td colspan="8" class="empty">范围内没有超过跳变速率阈值的相邻样本突变（或范围内没有有效样本）。</td></tr>`;
+  }
+  wrap.hidden = false;
+}
+
 /* ----------------------------- annotations ----------------------------- */
 
 function renderAnnotations() {
@@ -1859,13 +1984,16 @@ async function reloadAll() {
   renderAuditChannels();
   renderConsChannels();
   renderPairRules();
+  renderRecoveryChannels();
   if (!$("ledger-start").value || !$("ledger-end").value) fillLedgerRange();
   if (!$("audit-start").value || !$("audit-end").value) fillAuditRange();
   if (!$("cons-start").value || !$("cons-end").value) fillConsRange();
   if (!$("pair-start").value || !$("pair-end").value) fillPairRange();
+  if (!$("rec-start").value || !$("rec-end").value) fillRecoveryRange();
   if (state.auditResult) renderSamplingAudit();
   if (state.consResult) renderConsistency();
   if (state.pairResult) renderPairing();
+  if (state.recResult) renderMutationRecovery();
   syncFilterInputs();
   state.eventOffset = 0;
   await loadEvents(false);
@@ -2098,6 +2226,17 @@ function bind() {
   });
   $("btn-pair-query").addEventListener("click", runFaultPairing);
   $("btn-pair-fill").addEventListener("click", fillPairRange);
+
+  $("rec-device").addEventListener("change", () => {
+    state.recDevice = $("rec-device").value;
+    state.recMetric = "";
+    renderRecoveryChannels();
+  });
+  $("rec-metric").addEventListener("change", () => {
+    state.recMetric = $("rec-metric").value;
+  });
+  $("btn-rec-query").addEventListener("click", runMutationRecovery);
+  $("btn-rec-fill").addEventListener("click", fillRecoveryRange);
 
   $("brush-save").addEventListener("click", saveBrush);
   $("brush-cancel").addEventListener("click", () => { $("brush-pop").hidden = true; state.brush = null; });

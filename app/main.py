@@ -578,6 +578,62 @@ def get_fault_pairing(
 
 
 # --------------------------------------------------------------------------- #
+# Single-channel abrupt-change recovery diagnostic (read-only)
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/api/mutation-recovery")
+def get_mutation_recovery(
+    device: str = Query(..., min_length=1),
+    metric: str = Query(..., min_length=1),
+    start: str = Query(...),
+    end: str = Query(...),
+    rate_threshold: float = Query(..., gt=0),
+    regression_tolerance: float = Query(..., ge=0),
+    observation_seconds: float = Query(..., gt=0),
+) -> dict:
+    """Read-only abrupt-change recovery diagnostic for one existing channel.
+
+    Adjacent valid samples inside the half-open UTC window ``[start, end)``
+    are compared by change rate against their **actual** time difference; a
+    configured sample validity period (TTL) expiry gap cuts continuity and
+    no jump is judged across it.  The last still-valid sample before
+    ``start`` may serve as the pre-mutation baseline.  A jump strictly
+    greater than ``rate_threshold`` records its baseline and looks forward
+    for the first sample back within ``regression_tolerance`` of the
+    baseline within ``observation_seconds`` — recovered if found, otherwise
+    unrecovered with a reason (observation expired / TTL gap / window end).
+    Samples already attributed to a segment never open another one.  The
+    query only reads stored events and channel TTLs — it never recomputes
+    faults or writes anything.
+    """
+    start_ts = parse_bound(start)
+    end_ts = parse_bound(end)
+    if start_ts is None or end_ts is None:
+        raise HTTPException(status_code=400, detail="start and end are required")
+    if not math.isfinite(rate_threshold):
+        raise HTTPException(status_code=400, detail="rate_threshold must be a finite positive number per second")
+    if not math.isfinite(regression_tolerance):
+        raise HTTPException(status_code=400, detail="regression_tolerance must be a finite non-negative number")
+    if not math.isfinite(observation_seconds):
+        raise HTTPException(status_code=400, detail="observation_seconds must be a positive finite number of seconds")
+    try:
+        return services.query_mutation_recovery(
+            device,
+            metric,
+            start_ts,
+            end_ts,
+            rate_threshold,
+            regression_tolerance,
+            observation_seconds,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc).strip("'")) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --------------------------------------------------------------------------- #
 # Annotations
 # --------------------------------------------------------------------------- #
 
