@@ -41,6 +41,9 @@ const state = {
   pairCauseId: null,
   pairEffectId: null,
   pairResult: null,
+  jumpDevice: "",
+  jumpMetric: "",
+  jumpResult: null,
   imports: [],
 };
 
@@ -1680,6 +1683,133 @@ function renderPairing() {
   unmatchedWrap.hidden = false;
 }
 
+/* ------------------- single-channel jump recovery diagnostic ------------------- */
+
+function renderJumpChannels() {
+  const devSel = $("jump-device");
+  const metSel = $("jump-metric");
+  const devices = [...new Set(state.channels.map((c) => c.device))].sort();
+  if (state.jumpDevice && !devices.includes(state.jumpDevice)) state.jumpDevice = "";
+  if (!state.jumpDevice && devices.length) state.jumpDevice = devices[0];
+  devSel.innerHTML = devices.map((d) =>
+    `<option value="${esc(d)}"${d === state.jumpDevice ? " selected" : ""}>${esc(d)}</option>`).join("");
+
+  const metrics = state.channels
+    .filter((c) => c.device === state.jumpDevice)
+    .map((c) => c.metric)
+    .sort();
+  if (state.jumpMetric && !metrics.includes(state.jumpMetric)) state.jumpMetric = "";
+  if (!state.jumpMetric && metrics.length) state.jumpMetric = metrics[0];
+  metSel.innerHTML = metrics.map((m) =>
+    `<option value="${esc(m)}"${m === state.jumpMetric ? " selected" : ""}>${esc(m)}</option>`).join("");
+}
+
+function fillJumpRange() {
+  ensureView();
+  if (typeof state.viewStart === "number" && isFinite(state.viewStart)) {
+    $("jump-start").value = toLocalInput(state.viewStart);
+  }
+  if (typeof state.viewEnd === "number" && isFinite(state.viewEnd)) {
+    $("jump-end").value = toLocalInput(state.viewEnd);
+  }
+}
+
+async function runJumpRecovery() {
+  const device = $("jump-device").value;
+  const metric = $("jump-metric").value;
+  const s = fromLocalInput($("jump-start").value);
+  const e = fromLocalInput($("jump-end").value);
+  const rate = Number($("jump-rate").value);
+  const tolerance = Number($("jump-tolerance").value);
+  const observation = Number($("jump-observation").value);
+  if (!device || !metric) { toast("请先选择设备与指标（需已导入该通道事件）", true); return; }
+  if (s === null || e === null || e <= s) { toast("请填写有效的起始/结束 UTC 时间（半开区间，结束须晚于起始）", true); return; }
+  if (!Number.isFinite(rate) || rate <= 0) { toast("跳变速率阈值必须为正（单位/秒）", true); return; }
+  if (!Number.isFinite(tolerance) || tolerance < 0) { toast("回归容差必须为非负有限数", true); return; }
+  if (!Number.isFinite(observation) || observation <= 0) { toast("观察时长必须为正秒数", true); return; }
+  const params = new URLSearchParams({
+    device, metric, start: s, end: e,
+    jump_rate_threshold: rate,
+    regression_tolerance: tolerance,
+    observation_seconds: observation,
+  });
+  const btn = $("btn-jump-query");
+  btn.disabled = true;
+  try {
+    state.jumpResult = await api(`/api/jump-recovery?${params}`);
+    renderJumpRecovery();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+const JUMP_REASON_META = {
+  observation_expired: { label: "观察时长内未回到基线容差内", cls: "jump-unrec" },
+  range_end: { label: "查询范围结束（观察时长未走完）", cls: "jump-unrec" },
+  ttl_gap: { label: "采样有效期到期空档切断，未跨空档判恢复", cls: "jump-unrec" },
+};
+
+function jumpSampleCell(s) {
+  return `${fmtTime(s.ts)}<br/><span class="muted small">值 ${fmtNum(s.value)}</span>`;
+}
+
+function renderJumpRecovery() {
+  const r = state.jumpResult;
+  const summary = $("jump-summary");
+  const wrap = $("jump-table-wrap");
+  if (!r) {
+    summary.hidden = true;
+    wrap.hidden = true;
+    return;
+  }
+  const ttlText = r.ttl_seconds === null
+    ? "保持到下一样本"
+    : `有效期 ${fmtDur(r.ttl_seconds)}（${Number(r.ttl_seconds)} 秒）`;
+  summary.hidden = false;
+  summary.innerHTML = `
+    <div class="ledger-line"><b>通道：</b><span class="tag">${esc(r.device)}/${esc(r.metric)}</span>
+      <span class="muted small">（${ttlText} · 该通道共 ${r.channel.event_count} 个事件，${fmtTime(r.channel.min_ts)} ~ ${fmtTime(r.channel.max_ts)}）</span></div>
+    <div class="ledger-line"><b>诊断范围：</b>${fmtTime(r.start)} → ${fmtTime(r.end)}
+      （半开 · ${fmtDur(r.end - r.start)}）· 速率阈值 ${fmtNum(r.jump_rate_threshold)} 单位/秒（严格大于判突变）
+      · 回归容差 ${fmtNum(r.regression_tolerance)} · 观察时长 ${Number(r.observation_seconds)} 秒
+      · 范围内有效样本 ${r.sample_count} 个${r.used_pre_window_baseline ? " · <b>已使用范围起点前仍有效样本作基线</b>" : ""}</div>
+    <div class="ledger-line"><b>突变片段：</b>${r.episode_count} 段
+      · <span class="jump-rec">已恢复 ${r.recovered_count}</span>
+      · <span class="jump-unrec">未恢复 ${r.not_recovered_count}</span></div>`;
+
+  const rows = $("jump-rows");
+  if (r.episodes.length) {
+    rows.innerHTML = r.episodes.map((ep, i) => {
+      const status = ep.recovered
+        ? `<span class="jump-status jump-rec">已恢复</span>`
+        : `<span class="jump-status jump-unrec">未恢复</span>`;
+      const reason = ep.unrecovered_reason
+        ? esc((JUMP_REASON_META[ep.unrecovered_reason] || { label: ep.unrecovered_reason }).label)
+        : "—";
+      const recovery = ep.recovered
+        ? `<b>${Math.round(ep.recovery_seconds)}</b> 秒<br/><span class="muted small">${fmtClock(ep.jump_at)} → ${fmtClock(ep.recovery_sample.ts)}</span>`
+        : "—";
+      return `
+      <tr>
+        <td>${i + 1}</td>
+        <td>${status}</td>
+        <td>${jumpSampleCell(ep.baseline)}</td>
+        <td>${jumpSampleCell(ep.start_sample)}<br/><span class="muted small">速率 ${fmtNum(ep.jump_rate)} /秒</span></td>
+        <td>${fmtNum(ep.jump_rate)}</td>
+        <td><b>${fmtNum(ep.max_deviation)}</b><br/><span class="muted small">${fmtTime(ep.max_deviation_at.ts)} · 值 ${fmtNum(ep.max_deviation_at.value)}</span></td>
+        <td>${jumpSampleCell(ep.end_sample)}</td>
+        <td>${recovery}</td>
+        <td>${reason}</td>
+      </tr>`;
+    }).join("");
+  } else {
+    rows.innerHTML = `<tr><td colspan="9" class="empty">范围内未发现相邻有效样本的变化速率严格超过阈值的突变。</td></tr>`;
+  }
+  wrap.hidden = false;
+}
+
 /* ----------------------------- annotations ----------------------------- */
 
 function renderAnnotations() {
@@ -1859,13 +1989,16 @@ async function reloadAll() {
   renderAuditChannels();
   renderConsChannels();
   renderPairRules();
+  renderJumpChannels();
   if (!$("ledger-start").value || !$("ledger-end").value) fillLedgerRange();
   if (!$("audit-start").value || !$("audit-end").value) fillAuditRange();
   if (!$("cons-start").value || !$("cons-end").value) fillConsRange();
   if (!$("pair-start").value || !$("pair-end").value) fillPairRange();
+  if (!$("jump-start").value || !$("jump-end").value) fillJumpRange();
   if (state.auditResult) renderSamplingAudit();
   if (state.consResult) renderConsistency();
   if (state.pairResult) renderPairing();
+  if (state.jumpResult) renderJumpRecovery();
   syncFilterInputs();
   state.eventOffset = 0;
   await loadEvents(false);
@@ -2098,6 +2231,17 @@ function bind() {
   });
   $("btn-pair-query").addEventListener("click", runFaultPairing);
   $("btn-pair-fill").addEventListener("click", fillPairRange);
+
+  $("jump-device").addEventListener("change", () => {
+    state.jumpDevice = $("jump-device").value;
+    state.jumpMetric = "";
+    renderJumpChannels();
+  });
+  $("jump-metric").addEventListener("change", () => {
+    state.jumpMetric = $("jump-metric").value;
+  });
+  $("btn-jump-query").addEventListener("click", runJumpRecovery);
+  $("btn-jump-fill").addEventListener("click", fillJumpRange);
 
   $("brush-save").addEventListener("click", saveBrush);
   $("brush-cancel").addEventListener("click", () => { $("brush-pop").hidden = true; state.brush = null; });

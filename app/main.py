@@ -578,6 +578,62 @@ def get_fault_pairing(
 
 
 # --------------------------------------------------------------------------- #
+# Single-channel abrupt-change recovery diagnostic (read-only)
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/api/jump-recovery")
+def get_jump_recovery(
+    device: str = Query(..., min_length=1),
+    metric: str = Query(..., min_length=1),
+    start: str = Query(...),
+    end: str = Query(...),
+    jump_rate_threshold: float = Query(..., gt=0),
+    regression_tolerance: float = Query(..., ge=0),
+    observation_seconds: float = Query(..., gt=0),
+) -> dict:
+    """Read-only single-channel abrupt-change (jump) recovery diagnostic.
+
+    Over the half-open UTC window ``[start, end)`` the channel's samples are
+    walked in order; adjacent samples that stay continuously valid (a
+    configured per-channel TTL gap cuts continuity — nothing is judged across
+    it) form a jump when their actual change rate ``|Δv| / Δt`` is strictly
+    greater than ``jump_rate_threshold`` (positive).  The last sample before
+    the window may serve as the baseline while still valid.  Each jump records
+    its pre-jump baseline and searches forward, up to
+    ``observation_seconds`` (positive), for the first sample back within the
+    non-negative ``regression_tolerance``: found marks the episode recovered
+    (with the recovery time), otherwise it stays not recovered with a reason.
+    The diagnostic only reads events and the channel TTL — it never recomputes
+    or writes fault results.
+    """
+    start_ts = parse_bound(start)
+    end_ts = parse_bound(end)
+    if start_ts is None or end_ts is None:
+        raise HTTPException(status_code=400, detail="start and end are required")
+    if not math.isfinite(jump_rate_threshold) or jump_rate_threshold <= 0:
+        raise HTTPException(status_code=400, detail="jump_rate_threshold must be a positive finite number per second")
+    if not math.isfinite(regression_tolerance):
+        raise HTTPException(status_code=400, detail="regression_tolerance must be a finite non-negative number")
+    if not math.isfinite(observation_seconds) or observation_seconds <= 0:
+        raise HTTPException(status_code=400, detail="observation_seconds must be a positive finite number of seconds")
+    try:
+        return services.query_jump_recovery(
+            device,
+            metric,
+            start_ts,
+            end_ts,
+            jump_rate_threshold,
+            regression_tolerance,
+            observation_seconds,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc).strip("'")) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --------------------------------------------------------------------------- #
 # Annotations
 # --------------------------------------------------------------------------- #
 

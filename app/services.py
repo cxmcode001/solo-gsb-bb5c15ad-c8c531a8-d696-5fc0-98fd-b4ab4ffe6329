@@ -10,6 +10,7 @@ from collections import defaultdict
 from . import db
 from .audit import audit_cadence
 from .consistency import check_consistency
+from .jump_recovery import diagnose_jump_recovery
 from .pairing import PairableFault, pair_faults
 from .engine import (
     Condition,
@@ -1047,6 +1048,90 @@ def query_fault_pairing(
     }
     payload["start"] = start
     payload["end"] = end
+    return payload
+
+
+def query_jump_recovery(
+    device: str,
+    metric: str,
+    start: float,
+    end: float,
+    jump_rate_threshold: float,
+    regression_tolerance: float,
+    observation_seconds: float,
+) -> dict:
+    """Read-only single-channel abrupt-change recovery diagnostic.
+
+    Walks the channel's samples inside the half-open window ``[start, end)``
+    (plus the last sample before the window while it is still valid) and
+    finds adjacent *valid* samples whose actual change rate — value delta over
+    the samples' real time difference — strictly exceeds the positive
+    threshold.  An expired per-channel TTL gap cuts continuity (no jump and no
+    recovery is ever judged across the gap).  For every jump the pre-jump
+    baseline is recorded and the first later sample within
+    ``observation_seconds`` that is back within the non-negative tolerance
+    marks recovery; otherwise the episode is not recovered with a reason (see
+    :func:`app.jump_recovery.diagnose_jump_recovery`).  The query only
+    ``SELECT``\ s events and the channel's TTL: it never writes anything and
+    never re-evaluates rules.
+
+    Raises ``KeyError`` when the (device, metric) channel has no events and
+    ``ValueError`` for an invalid window / threshold / tolerance /
+    observation duration.
+    """
+    device = device.strip()
+    metric = metric.strip()
+    if not device or not metric:
+        raise ValueError("device and metric are required")
+    start = float(start)
+    end = float(end)
+    if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+        raise ValueError("diagnostic end must be greater than start (half-open [start, end))")
+    threshold = float(jump_rate_threshold)
+    if not math.isfinite(threshold) or threshold <= 0:
+        raise ValueError("jump_rate_threshold must be a positive finite number per second")
+    tolerance = float(regression_tolerance)
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("regression_tolerance must be a finite non-negative number")
+    observation = float(observation_seconds)
+    if not math.isfinite(observation) or observation <= 0:
+        raise ValueError("observation_seconds must be a positive finite number of seconds")
+
+    channel = db.query_one(
+        "SELECT COUNT(*) AS c, MIN(ts) AS min_ts, MAX(ts) AS max_ts FROM events"
+        " WHERE device = ? AND metric = ?",
+        (device, metric),
+    )
+    if channel is None or channel["c"] == 0:
+        raise KeyError(f"channel not found: {device}/{metric}")
+
+    horizon_row = db.query_one("SELECT MAX(ts) AS hi FROM events")
+    horizon = horizon_row["hi"] if horizon_row and horizon_row["hi"] is not None else 0.0
+
+    ttl_row = db.fetch_channel_ttl(device, metric)
+    ttl = ttl_row["ttl_seconds"] if ttl_row else None
+
+    result = diagnose_jump_recovery(
+        _channel_samples_for_window(device, metric, start, end),
+        horizon,
+        start,
+        end,
+        threshold,
+        tolerance,
+        observation,
+        ttl=ttl,
+    )
+    payload = result.to_dict()
+    payload["device"] = device
+    payload["metric"] = metric
+    payload["channel"] = {
+        "device": device,
+        "metric": metric,
+        "ttl_seconds": ttl,
+        "event_count": channel["c"],
+        "min_ts": channel["min_ts"],
+        "max_ts": channel["max_ts"],
+    }
     return payload
 
 

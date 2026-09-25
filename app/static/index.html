@@ -436,6 +436,56 @@
       </section>
 
       <section class="card">
+        <div class="card-head">
+          <h2>单通道突变恢复诊断</h2>
+          <span class="muted small">只读 · 读取事件与通道有效期，不重算故障</span>
+        </div>
+        <div class="muted small ledger-hint">
+          从现有通道选择<b>设备与指标</b>，输入 <b>UTC 半开时间范围</b> <code>[start, end)</code>、<b>正数跳变速率阈值</b>（单位/秒）、
+          <b>非负回归容差</b> 与 <b>正数观察时长</b>（秒）。服务端按<b>相邻有效样本的实际时间差</b>计算变化速率
+          <code>|Δv| / Δt</code>，严格大于阈值即判突变；<b>采样有效期到期的空档切断连续性，不跨空档判突变</b>，
+          范围起点前仍有效的最近样本可作基线。突变后记下<b>突变前基线</b>，向后在观察时长内寻找<b>首个回到基线容差内</b>
+          （<code>|值 − 基线| ≤ 容差</code>）的样本：找到标为已恢复（给出恢复耗时），未找到按观察到期 / 范围结束 /
+          有效期空档标为未恢复并给出原因；已归属片段不重复开段。逐段列出起止样本、最大偏差与恢复耗时。
+        </div>
+        <div class="ledger-form">
+          <label class="ledger-field">设备
+            <select id="jump-device"></select>
+          </label>
+          <label class="ledger-field">指标
+            <select id="jump-metric"></select>
+          </label>
+          <label class="ledger-field">起始（本机时区） <input type="datetime-local" id="jump-start" step="1" /></label>
+          <label class="ledger-field">结束（本机时区） <input type="datetime-local" id="jump-end" step="1" /></label>
+          <label class="ledger-field">跳变速率阈值（单位/秒，&gt; 0） <input id="jump-rate" type="number" min="0" step="any" value="0.1" /></label>
+          <label class="ledger-field">回归容差（≥ 0） <input id="jump-tolerance" type="number" min="0" step="any" value="1" /></label>
+          <label class="ledger-field">观察时长（秒，&gt; 0） <input id="jump-observation" type="number" min="0" step="any" value="300" /></label>
+          <button id="btn-jump-query" class="btn btn-small btn-primary">诊断</button>
+          <button id="btn-jump-fill" class="btn btn-small">填入当前筛选范围</button>
+        </div>
+        <div class="muted small">时间在本机时区输入、按 UTC 查询；诊断只读取事件与通道采样有效期，不写入事件 / 故障，也不触发重算。</div>
+        <div id="jump-summary" class="ledger-summary" hidden></div>
+        <div id="jump-table-wrap" class="ledger-table-wrap" hidden>
+          <table class="data-table ledger-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>状态</th>
+                <th>基线样本</th>
+                <th>突变样本（起）</th>
+                <th>跳变速率</th>
+                <th>最大偏差 / 样本</th>
+                <th>结束样本</th>
+                <th>恢复耗时</th>
+                <th>未恢复原因</th>
+              </tr>
+            </thead>
+            <tbody id="jump-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
         <div class="card-head"><h2>区间标注</h2><span id="anno-count" class="muted"></span></div>
         <div id="anno-list"></div>
       </section>
